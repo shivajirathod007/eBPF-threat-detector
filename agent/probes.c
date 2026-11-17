@@ -62,11 +62,21 @@ static __always_inline void identify(struct data_t *data, u32 type) {
     bpf_probe_read_kernel(data->parent_comm, sizeof(data->parent_comm), task->real_parent->comm);
 }
 
+static __always_inline void capture_path(struct data_t *data, const char *filename) {
+    long size = bpf_probe_read_user_str(data->path, sizeof(data->path), filename);
+    if (size <= 0) data->path[0] = 0;
+    if (size == sizeof(data->path)) {
+        // The helper terminates a clipped string itself. Check the original last byte.
+        char last = 0;
+        data->arg2 = bpf_probe_read_user(&last, sizeof(last), filename + sizeof(data->path) - 1) || last;
+    }
+}
+
 static __always_inline int trace_exec(struct pt_regs *ctx, const char *filename) {
     if (is_sensor()) return 0;
     struct data_t data = {};
     identify(&data, EXEC);
-    bpf_probe_read_user_str(data.path, sizeof(data.path), filename);
+    capture_path(&data, filename);
     events.perf_submit(ctx, &data, sizeof(data));
     return 0;
 }
@@ -76,7 +86,7 @@ static __always_inline int trace_open(struct pt_regs *ctx, const char *filename,
     struct data_t data = {};
     identify(&data, OPEN);
     data.arg1 = flags;
-    bpf_probe_read_user_str(data.path, sizeof(data.path), filename);
+    capture_path(&data, filename);
     events.perf_submit(ctx, &data, sizeof(data));
     return 0;
 }

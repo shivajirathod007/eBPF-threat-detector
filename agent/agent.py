@@ -70,6 +70,8 @@ def normalize(raw, wall_offset):
     }
     if event_type in ("EXEC", "OPEN"):
         event["path"] = raw.path.decode("utf-8", "replace")
+        if raw.arg2:
+            event["path_truncated"] = True
     if event_type == "OPEN":
         event["flags"] = raw.arg1
     elif event_type == "CONNECT":

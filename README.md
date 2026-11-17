@@ -1,6 +1,6 @@
 # Runtime Watch
 
-Runtime Watch is an eBPF threat detector for an Ubuntu Server lab. The BCC agent observes host-kernel activity, evaluates 17 MITRE ATT&CK-mapped rules, and serves a live dashboard. The project is by Shivaji Rathod, Archit Dandavate, Prathmesh Surywanshi, and Athrav Bhajan.
+Runtime Watch is an eBPF threat detector for an Ubuntu Server lab. The BCC agent observes host-kernel activity, evaluates 17 MITRE ATT&CK-mapped rules, and serves a live dashboard.
 
 ## Start on the Ubuntu VM
 
@@ -77,7 +77,7 @@ The dashboard is a single-user lab interface with HTTP and no login. Bind it to 
 - Open **Detection rules** for per-rule alert totals and last-seen times since sensor start. Select an observed rule to find its recent alerts.
 - In **Simulation lab**, choose a scenario and click **Run selected**, or use the **Run** button beside a scenario. **Run all scenarios** queues every drill one at a time. You can stop after the current drill. The run history keeps up to 30 results in the current dashboard tab, with a JSON export for saving the report.
 
-The simulation service runs as UID 10001 with dropped Linux capabilities, a read-only root filesystem, and a temporary scratch directory. Its 16 drills cover all 17 rules. They use real syscalls, disposable fixtures, and a local TCP connection. The systemd, dynamic linker and sudo drills open paths without creating, truncating or writing files. The process-memory drills target disposable child processes without reading or modifying memory. Browser runs report both the command exit status and the expected rules observed for that run.
+The simulation service runs as UID 10001 with dropped Linux capabilities, a read-only root filesystem, and a temporary scratch directory. Its 16 drills cover all 17 rules. They use real syscalls, disposable fixtures, and a local TCP connection. The cron, systemd, dynamic linker and sudo drills open paths without creating, truncating or writing files. The web-service drill names its disposable parent process `nginx` to exercise the process-name heuristic. The process-memory drills target disposable child processes without reading or modifying memory. Browser runs report both the command exit status and the expected rules observed for that run.
 
 To validate the full pipeline on Ubuntu, select **Run all scenarios** and check that the suite reports **16 fully verified**. Inspect the reverse-shell run for a connection and redirection with the same `socket_inode`. Inspect the ptrace memory write run for both the general ptrace and the specific write-attempt alerts. Review the detector logs and perf-loss count if an expected alert is missing.
 
@@ -107,13 +107,13 @@ The probes observe `execve`/`execveat`, `open`/`openat`/`openat2`/`creat`, IPv4 
 
 The reverse-shell heuristic links a successful or in-progress TCP connect to a successful redirection of the same socket inode onto stdin, stdout or stderr from the same process within three seconds. It handles aliased descriptors and excludes unrelated files that reuse a descriptor number. The critical alert links both events. Legitimate programs that redirect TCP sockets can also match.
 
-These are syscall heuristics. Editors that replace files through a rename, relative paths opened through directory descriptors, file descriptors used with an empty execution path, and alternate entry points such as io_uring can fall outside the configured file rules. Inbound scans and SSH authentication failures require other telemetry. The shell profile and SSH private key rules can also fire during legitimate administration.
+These are syscall heuristics. Editors that replace files through a rename, paths resolved through symlinks or directory descriptors, file descriptors used with an empty execution path, and alternate entry points such as io_uring can fall outside the configured file rules. UID changes made through `setreuid` or `setresuid` are outside the current UID probe. Inbound scans and SSH authentication failures require other telemetry. The shell profile and SSH private key rules can also fire during legitimate administration.
 
 The API provides `GET /api/health`, `/api/stats`, `/api/snapshot`, `/api/events`, `/api/alerts`, `/api/rules`, and `/api/simulations`. Browser drills use `POST /api/attack/<scenario>` with the `X-Lab-Action: simulate` header.
 
 ## Configurable rules
 
-Add a unique name, description, severity, and MITRE ATT&CK ID. An `OPEN` rule takes `access: read` or `access: write`, and a `path_regex` matched against the entire observed path. Use YAML single quotes for regex patterns containing backslashes. A `PTRACE` rule takes a list of numeric `requests`. Rebuild after editing the file. Invalid match definitions and missing built-in rules fail at startup so they cannot silently appear as enabled coverage.
+Add a unique name, description, severity, and MITRE ATT&CK ID. An `OPEN` rule takes `access: read` or `access: write`, and a `path_regex` matched against the entire path after folding redundant slashes and interior `.` components. Evidence retains the raw input and marks paths clipped by the sensor. Clipped paths are excluded from exact-name and regex checks. Use YAML single quotes for regex patterns containing backslashes. Keep custom regexes simple and use trusted configuration because Python's regex engine evaluates them without a per-match timeout. A `PTRACE` rule takes a list of numeric `requests`. Rebuild after editing the file. Invalid match definitions and missing built-in rules fail at startup so they cannot silently appear as enabled coverage.
 
 | Rule | ATT&CK mapping |
 | --- | --- |

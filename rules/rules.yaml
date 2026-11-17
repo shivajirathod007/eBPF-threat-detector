@@ -1,6 +1,6 @@
 rules:
   - name: shell_from_webserver
-    description: "A shell process was spawned by a web-server-like parent process"
+    description: "A process with a known web server name requested shell execution"
     severity: CRITICAL
     mitre: T1059
   - name: exec_from_tmp
@@ -16,11 +16,11 @@ rules:
     severity: HIGH
     mitre: T1003.008
   - name: ssh_key_tampering
-    description: "A process attempted to open .ssh/authorized_keys for writing"
+    description: "A process requested write access to .ssh/authorized_keys or .ssh/authorized_keys2"
     severity: HIGH
     mitre: T1098
   - name: cron_persistence
-    description: "A process attempted to open a crontab or cron path for writing"
+    description: "A process requested write access to a system crontab, periodic job or cron spool file"
     severity: MEDIUM
     mitre: T1053.003
   - name: suspicious_port_connect
@@ -46,7 +46,14 @@ rules:
     match:
       event: OPEN
       access: write
-      path_regex: '(?:(?:/etc|/run|/usr/lib|/lib)/systemd/(?:system|user)/|/(?:[^/]+/)*\.config/systemd/user/)(?:[^/]+/)*[^/]+\.service(?:\.d/[^/]+\.conf)?'
+      path_regex: |-
+        (?x)
+        (?:
+          (?:/etc|/run|/usr/lib|/usr/local/lib|/lib)/systemd/(?:system|user)(?:\.control|\.attached)?/
+          | /run/user/[0-9]+/systemd/user(?:\.control)?/
+          | /(?:[^/]+/)*(?:\.config|\.local/share)/systemd/user(?:\.control)?/
+        )
+        (?: [^/]+\.service | (?:[^/]+\.service|service)\.d/[^/]+\.conf )
   - name: dynamic_loader_tampering
     description: "A process requested write access to the global dynamic linker preload file"
     severity: CRITICAL
@@ -70,7 +77,7 @@ rules:
     match:
       event: OPEN
       access: write
-      path_regex: '/etc/(?:profile|bash\.bashrc|profile\.d/[^/]+\.sh|zsh/(?:zshenv|zprofile|zshrc|zlogin))|(?:[^/]+/|/)*\.(?:bashrc|bash_profile|bash_login|profile|zshenv|zprofile|zshrc|zlogin)'
+      path_regex: '/etc/(?:profile|bash\.bashrc|profile\.d/[^/]+\.sh|zsh/(?:zshenv|zprofile|zshrc|zlogin|zlogout))|(?:[^/]+/|/)*\.(?:bashrc|bash_profile|bash_login|profile|zshenv|zprofile|zshrc|zlogin|zlogout)'
   - name: ssh_private_key_access
     description: "A process requested read access to a conventional private key filename under .ssh"
     severity: MEDIUM

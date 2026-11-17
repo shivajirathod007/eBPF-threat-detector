@@ -76,8 +76,62 @@ class DetectionTests(unittest.TestCase):
     def test_tmp_rule_uses_directory_boundary_and_kernel_parent(self):
         self.record("EXEC", path="/tmpfile")
         self.record("EXEC", path="/tmp/payload")
-        self.record("EXEC", path="/bin/sh")
+        self.record("EXEC", path="/bin/sh", parent_comm="nginx")
         self.assertEqual(self.rules(), ["shell_from_webserver", "exec_from_tmp"])
+
+    def test_path_normalization_preserves_raw_evidence_and_does_not_fold_parent_components(self):
+        event = self.record("OPEN", path="//etc/./shadow", flags=os.O_RDONLY)
+        self.assertEqual(self.rules(), ["sensitive_file_read"])
+        self.assertEqual(event["path"], "//etc/./shadow")
+        self.assertIn("//etc/./shadow", self.telemetry.alerts[0]["detail"])
+        self.record("OPEN", path="/etc/shadow/.", flags=os.O_RDONLY)
+        self.record("OPEN", path="/etc/shadow/", flags=os.O_RDONLY)
+        self.record("OPEN", path="/etc/link/../shadow", flags=os.O_RDONLY)
+        self.record("EXEC", path="/tmp/../usr/bin/true")
+        self.assertEqual(self.rules(), ["sensitive_file_read"])
+        self.record("OPEN", path="//etc/./ld.so.preload", flags=os.O_WRONLY)
+        self.assertEqual(self.rules()[0], "dynamic_loader_tampering")
+
+    def test_precise_cron_and_ssh_locations(self):
+        for path in ("/tmp/crontab", "/etc/cron.backup/job", "/etc/cron.d/../hosts",
+                     "/tmp/.ssh/other/authorized_keys", "/home/test/.ssh/authorized_keys2.bak"):
+            self.record("OPEN", path=path, flags=os.O_WRONLY)
+        self.assertEqual(self.rules(), [])
+        self.record("OPEN", path="/etc/crontab", flags=os.O_WRONLY)
+        self.record("OPEN", path="/var/spool/cron/crontabs/operator", flags=os.O_WRONLY)
+        self.record("OPEN", path="./.ssh//authorized_keys2", flags=os.O_WRONLY)
+        self.assertEqual(self.rules(), ["ssh_key_tampering", "cron_persistence", "cron_persistence"])
+
+    def test_systemd_service_drop_ins_and_search_paths(self):
+        for path in ("/etc/systemd/system/archive/unit.service", "/etc/systemd/system/service.d/10.conf.bak",
+                     "/home/test/.config/systemd/user/unrelated/conf.service"):
+            self.record("OPEN", path=path, flags=os.O_WRONLY)
+        self.assertEqual(self.rules(), [])
+        for path in ("/etc/systemd/system/service.d/10.conf", "/usr/local/lib/systemd/system/new.service",
+                     "/home/test/.local/share/systemd/user/unit.service", "/run/user/1000/systemd/user/unit.service",
+                     "/etc/systemd/system/template@.service.d/20.conf"):
+            self.record("OPEN", path=path, flags=os.O_WRONLY)
+        self.assertEqual(self.rules(), ["systemd_unit_write"] * 5)
+
+    def test_web_parent_heuristic_excludes_generic_python(self):
+        for parent in ("python3", "php-fpm-backup", "nginx-test"):
+            self.record("EXEC", path="/bin/sh", parent_comm=parent)
+        self.assertEqual(self.rules(), [])
+        for parent in ("nginx", "php-fpm8.3", "gunicorn"):
+            self.record("EXEC", path="/bin/sh", parent_comm=parent)
+        self.assertEqual(self.rules(), ["shell_from_webserver"] * 3)
+
+    def test_truncated_paths_cannot_match_complete_file_names(self):
+        raw = SimpleNamespace(type=2, ktime_ns=1, pid=250, ppid=240, uid=1000,
+                              comm=b"test", parent_comm=b"bash", cgroup_id=42, process_start=80,
+                              arg1=os.O_WRONLY, arg2=1, path=b"/etc/ld.so.preload")
+        event = normalize(raw, 0)
+        self.assertTrue(event["path_truncated"])
+        self.telemetry.record(event)
+        self.record("EXEC", path="/usr/bin/nc", path_truncated=True)
+        self.assertEqual(self.rules(), [])
+        self.record("EXEC", path="/tmp/payload-fragment", path_truncated=True)
+        self.assertEqual(self.rules(), ["exec_from_tmp"])
 
     def test_configured_file_rules_match_the_intended_paths_and_access(self):
         cases = (
@@ -109,9 +163,12 @@ class DetectionTests(unittest.TestCase):
         self.assertIn("namespace PID 4", self.telemetry.alerts[0]["detail"])
 
     def test_invalid_yaml_match_fails_when_loading_rules(self):
-        rules = self.telemetry.rules | {"invalid": {"match": {"event": "OPEN", "access": "write", "path_regex": "["}}}
-        with self.assertRaisesRegex(ValueError, "Invalid match for rule invalid"):
-            Detector(rules)
+        for pattern in ("[", " ", b"/etc/crontab"):
+            with self.subTest(pattern=pattern):
+                match = {"event": "OPEN", "access": "write", "path_regex": pattern}
+                rules = self.telemetry.rules | {"invalid": {"match": match}}
+                with self.assertRaisesRegex(ValueError, "Invalid match for rule invalid"):
+                    Detector(rules)
 
     def test_simulations_cover_every_rule_and_use_configured_ports(self):
         self.assertEqual({name for _, _, names in SCENARIOS.values() for name in names}, self.telemetry.rules.keys())

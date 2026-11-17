@@ -17,11 +17,11 @@ SCENARIOS = {
     "sensitive_file_read": ("Credential file access", "Attempt to open /etc/shadow as an unprivileged user.", ["sensitive_file_read"]),
     "exec_from_tmp": ("Temporary executable", "Copy and run a harmless executable from /tmp.", ["exec_from_tmp"]),
     "ssh_key_tamper": ("SSH key persistence", "Write a fixture named .ssh/authorized_keys in a disposable directory.", ["ssh_key_tampering"]),
-    "cron_persistence": ("Cron persistence", "Write sample schedule text to a disposable crontab file.", ["cron_persistence"]),
+    "cron_persistence": ("Cron persistence", "Request write access to /etc/crontab without changing it.", ["cron_persistence"]),
     "netcat_exec": ("Netcat execution", "Start netcat in help mode.", ["netcat_execution"]),
     "privilege_escalation": ("Root UID request", "Attempt setuid(0) from an unprivileged process.", ["privilege_escalation"]),
     "ptrace_usage": ("Process tracing", "Attempt to trace a temporary child process.", ["ptrace_usage"]),
-    "shell_from_webserver": ("Shell from Python", "Have a Python parent launch a shell that immediately exits.", ["shell_from_webserver"]),
+    "shell_from_webserver": ("Shell from a web-service process", "Name the disposable parent nginx and launch a shell that immediately exits.", ["shell_from_webserver"]),
     "reverse_shell": ("Reverse-shell behavior", "Connect to a local TCP listener and duplicate the socket onto stdout.", ["suspicious_port_connect", "reverse_shell_pattern"]),
     "systemd_unit_write": ("Systemd service write attempt", "Request a writable descriptor for an absent service unit.", ["systemd_unit_write"]),
     "dynamic_loader_tampering": ("Dynamic linker preload attempt", "Try opening /etc/ld.so.preload for writing, without changing it.", ["dynamic_loader_tampering"]),
@@ -33,6 +33,7 @@ SCENARIOS = {
 }
 
 PROTECTED_PATHS = {
+    "cron_persistence": "/etc/crontab",
     "systemd_unit_write": "/etc/systemd/system/runtime-watch-lab.service",
     "dynamic_loader_tampering": "/etc/ld.so.preload",
     "sudoers_write": "/etc/sudoers",
@@ -71,6 +72,7 @@ def bind_test_listener(listener):
 
 def run_scenario(name, tag, directory):
     if name == "shell_from_webserver":
+        mark_process("nginx")
         child = os.fork()
         if child == 0:
             mark_process(tag)
@@ -89,8 +91,6 @@ def run_scenario(name, tag, directory):
         keys = directory / ".ssh" / "authorized_keys"
         keys.parent.mkdir()
         keys.write_text("# Temporary authorized_keys fixture\n")
-    elif name == "cron_persistence":
-        (directory / "crontab").write_text("0 * * * * /bin/true\n")
     elif name == "netcat_exec":
         nc = shutil.which("nc")
         if not nc:
