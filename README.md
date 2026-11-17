@@ -73,9 +73,9 @@ The dashboard is a single-user lab interface with HTTP and no login. Bind it to 
 ## Investigate and export a session
 
 - Switch between events and alerts in the activity chart and select a 2-, 5-, or 15-minute window.
-- Select a severity to filter the recent alerts. Open an alert to mark it reviewed, jump to recent events from that process, or export the available evidence. Review marks are stored in the current browser and scoped to the sensor session. Export JSON on the feed downloads all matching buffered records.
-- Open **Rule coverage** for per-rule alert totals and last-seen times since sensor start. Select an observed rule to find its recent alerts.
-- In **Simulation lab**, select **Run all scenarios** to queue the drills one at a time. You can stop after the current drill. The run history keeps up to 30 results in the current dashboard tab, with a JSON export for saving the report.
+- In **Alert triage**, use the queue filters or press `/` to focus search. Select a row to inspect its event timeline, review the alert, jump to events from the same process, or export evidence. The queue shows timestamps in UTC. Review marks are stored in the current browser and scoped to the sensor session. Export JSON on the feed downloads all matching buffered records across pages.
+- Open **Detection rules** for per-rule alert totals and last-seen times since sensor start. Select an observed rule to find its recent alerts.
+- In **Simulation lab**, choose a scenario and click **Run selected**, or use the **Run** button beside a scenario. **Run all scenarios** queues every drill one at a time. You can stop after the current drill. The run history keeps up to 30 results in the current dashboard tab, with a JSON export for saving the report.
 
 The simulation service runs as UID 10001 with dropped Linux capabilities, a read-only root filesystem, and a temporary scratch directory. Its 16 drills cover all 17 rules. They use real syscalls, disposable fixtures, and a local TCP connection. The systemd, dynamic linker and sudo drills open paths without creating, truncating or writing files. The process-memory drills target disposable child processes without reading or modifying memory. Browser runs report both the command exit status and the expected rules observed for that run.
 

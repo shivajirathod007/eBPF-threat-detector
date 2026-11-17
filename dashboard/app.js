@@ -3,13 +3,15 @@
 const $ = (id) => document.getElementById(id);
 const levels = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 const eventTypes = ["EXEC", "OPEN", "CONNECT", "DUP2", "SETUID", "PTRACE"];
-const pages = {overview: "Overview", coverage: "Rule coverage", lab: "Simulation lab"};
+const pages = ["overview", "coverage", "lab"];
 const formatNumber = new Intl.NumberFormat();
 const compactNumber = new Intl.NumberFormat(undefined, {notation: "compact"});
-const formatTime = new Intl.DateTimeFormat(undefined, {timeStyle: "medium"});
-const formatDate = new Intl.DateTimeFormat(undefined, {dateStyle: "medium", timeStyle: "short"});
+const formatTime = new Intl.DateTimeFormat(undefined, {timeStyle: "medium", hourCycle: "h23", timeZone: "UTC"});
+const formatDate = new Intl.DateTimeFormat(undefined, {dateStyle: "medium", timeStyle: "short", hourCycle: "h23", timeZone: "UTC"});
 const reviewKey = "runtime-watch.reviewed";
 const filterByMode = {alerts: "", events: ""};
+const localPreview = location.protocol === "file:";
+const pageSize = 50;
 let mode = "alerts";
 let paused = false;
 let stats = null;
@@ -18,6 +20,8 @@ let feed = null;
 let scope = null;
 let focusFeed = false;
 let currentMatches = [];
+let pageIndex = 0;
+let selection = null;
 let rules = null;
 let coverageSignature = "";
 let loadingCoverage = false;
@@ -54,7 +58,7 @@ function button(text, action, className = "button quiet") {
 }
 
 async function api(path, options) {
-  if (location.protocol === "file:") throw new Error("Open the dashboard through the Ubuntu VM’s published HTTP port.");
+  if (localPreview) throw new Error("Open the dashboard through the Ubuntu VM’s published HTTP port.");
   const response = await fetch(path, {signal: AbortSignal.timeout(17000), ...options});
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
@@ -63,14 +67,13 @@ async function api(path, options) {
 
 function activePage() {
   const page = location.hash.slice(1);
-  return Object.hasOwn(pages, page) ? page : "overview";
+  return pages.includes(page) ? page : "overview";
 }
 
 function showPage() {
   const active = activePage();
-  for (const page of Object.keys(pages)) $(page + "-view").hidden = active !== page;
+  for (const page of pages) $(page + "-view").hidden = active !== page;
   window.scrollTo(0, 0);
-  $("breadcrumb").textContent = pages[active];
   document.querySelectorAll("nav a").forEach((link) => {
     if (link.hash === `#${active}`) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
@@ -89,7 +92,8 @@ function showPage() {
 
 function status(state, label, note = "") {
   $("connection").dataset.state = state;
-  $("connection").lastElementChild.textContent = label;
+  const indicator = $("connection").lastElementChild;
+  if (indicator.textContent !== label) indicator.textContent = label;
   $("connection-note").hidden = !note;
   $("connection-note").textContent = note;
   if (state === "offline") {
@@ -112,6 +116,9 @@ function drawChart() {
   chart.height = Math.round(height * ratio);
   const ctx = chart.getContext("2d");
   ctx.scale(ratio, ratio);
+  const palette = getComputedStyle(chart);
+  const labelColor = palette.getPropertyValue("--muted").trim();
+  const gridColor = palette.getPropertyValue("--line").trim();
 
   const minutes = Number($("chart-range").value);
   const metric = Number($("chart-metric").value);
@@ -139,19 +146,16 @@ function drawChart() {
   ctx.textBaseline = "middle";
   for (let i = 0; i <= 4; i++) {
     const y = bottom - i * (bottom - top) / 4;
-    ctx.fillStyle = "#596782";
+    ctx.fillStyle = labelColor;
     ctx.fillText(compactNumber.format(i * step), startX - 8, y);
-    ctx.strokeStyle = "#e7ebf3";
+    ctx.strokeStyle = gridColor;
     ctx.beginPath();
     ctx.moveTo(startX, y);
     ctx.lineTo(width - 2, y);
     ctx.stroke();
   }
   const bin = (width - startX - 3) / values.length;
-  const fill = ctx.createLinearGradient(0, top, 0, bottom);
-  fill.addColorStop(0, metric ? "#e16886" : "#6464ec");
-  fill.addColorStop(1, metric ? "#f3b2c0" : "#b1b1fa");
-  ctx.fillStyle = fill;
+  ctx.fillStyle = palette.getPropertyValue(metric ? "--chart-alerts" : "--accent").trim();
   values.forEach((value, index) => {
     const bar = (bottom - top) * value / (step * 4);
     ctx.fillRect(startX + index * bin + 2, bottom - bar, Math.max(1, bin - 4), bar);
@@ -168,8 +172,8 @@ function renderStats() {
   $("lost-count").textContent = `${formatNumber.format(stats.dropped)} perf records lost`;
   $("lost-count").classList.toggle("warning-text", stats.dropped > 0);
   const probeLabel = stats.ready ? `${stats.probes} probes attached` : "Waiting for probes";
-  $("probe-count").textContent = probeLabel;
-  $("last-sync").textContent = formatTime.format(new Date());
+  $("probe-count").textContent = localPreview ? "Preview only" : probeLabel;
+  $("last-sync").textContent = localPreview ? "—" : formatTime.format(new Date());
   const segments = $("severity-track").querySelectorAll("span");
   levels.forEach((level, index) => {
     const count = stats.severity[level];
@@ -246,6 +250,7 @@ function openFeed(next, selection, severity = "") {
   $("search").value = "";
   $("review-filter").value = "";
   filterByMode[next] = severity;
+  clearSelection();
   if (snapshot && scope?.session && feed?.stats.session !== scope.session) {
     setPaused(false);
   }
@@ -257,14 +262,28 @@ function openFeed(next, selection, severity = "") {
   }
 }
 
-function showEvidence(record, source, session) {
-  const view = $("detail-content");
-  const actions = $("detail-actions");
-  view.replaceChildren();
-  actions.replaceChildren();
-  $("detail-title").textContent = record.rule ? ruleName(record.rule) : `${record.type} event`;
-
+function renderEvidence(view, record, source, session) {
   const related = [];
+  const summary = node("div", undefined, "evidence-summary");
+  const badges = node("div", undefined, "evidence-badges");
+  badges.append(pill(record.severity ?? record.type, record.severity));
+  if (record.mitre) badges.append(node("span", record.mitre, "mono subtle"));
+  summary.append(node("h3", record.rule ? ruleName(record.rule) : eventDetail(record), "evidence-heading"), badges);
+  if (record.rule) summary.append(node("p", record.detail));
+
+  const trigger = record.rule ? source?.events.find((event) => event.event_id === record.event_id) : record;
+  const fields = node("dl", undefined, "evidence-grid");
+  for (const [label, value] of [
+    ["Process", record.comm], ["Host PID", record.pid], ["Parent PID", record.ppid],
+    ["UID", record.uid], ["Cgroup ID", record.cgroup_id], ["Parent process", trigger?.parent_comm]
+  ]) {
+    if (value == null || value === "") continue;
+    const field = node("div");
+    field.append(node("dt", label), node("dd", value));
+    fields.append(field);
+  }
+
+  const actions = node("div", undefined, "evidence-actions");
   if (record.rule) {
     const review = button("", () => {
       toggleReview(record, session);
@@ -272,38 +291,91 @@ function showEvidence(record, source, session) {
     });
     function updateReviewButton() {
       const checked = reviewed.has(reviewId(record, session));
-      review.textContent = checked ? "Reviewed · undo" : "Mark reviewed";
+      review.textContent = checked ? "Undo review" : "Mark reviewed";
     }
     updateReviewButton();
     actions.append(review);
-    view.append(node("p", record.detail), node("h3", "Detection"), node("pre", JSON.stringify(record, null, 2)));
-    for (const [label, id] of [["Triggering event", record.event_id], ["Correlated connection", record.connect_event_id]]) {
-      if (!id) continue;
-      const evidence = source?.events.find((item) => item.event_id === id);
-      if (evidence) related.push(evidence);
-      view.append(node("h3", label), evidence
-        ? node("pre", JSON.stringify(evidence, null, 2))
-        : node("p", `Event #${id} is outside the recent event buffer.`, "subtle"));
+  }
+
+  function closeAndPivot() {
+    if ($("detail").open) $("detail").close();
+    openFeed("events", {pid: record.pid, start: record.process_start ?? trigger.process_start, session});
+  }
+  if (session === stats?.session && (record.process_start ?? trigger?.process_start) != null) {
+    actions.append(button("Process events", closeAndPivot));
+  }
+
+  const evidence = node("section", undefined, "evidence-section");
+  evidence.append(node("h3", record.rule ? "Event timeline (UTC)" : "Event details (UTC)"));
+  const timeline = node("ol", undefined, "timeline");
+  for (const [label, id] of [["TCP connection", record.connect_event_id],
+    [record.rule ? "Triggering event" : record.type, record.event_id]]) {
+    if (id == null) continue;
+    const event = record.rule ? source?.events.find((item) => item.event_id === id) : record;
+    const row = node("li");
+    row.append(node("strong", label));
+    if (event) {
+      if (record.rule) related.push(event);
+      row.append(node("time", formatTime.format(new Date(event.ts * 1000))), node("p", eventDetail(event)));
+    } else {
+      row.append(node("p", `Event #${id} is outside the recent buffer.`));
     }
-  } else {
-    view.append(node("p", eventDetail(record)), node("pre", JSON.stringify(record, null, 2)));
+    timeline.append(row);
   }
-  const process = record.process_start ?? related[0]?.process_start;
-  if (session === stats?.session && process != null) {
-    actions.append(button(`Events for PID ${record.pid}`, () => {
-      $("detail").close();
-      openFeed("events", {pid: record.pid, start: process, session});
-    }));
-  }
-  actions.append(button("Export evidence", () => download("evidence", {session, record, related_events: related})));
+  evidence.append(timeline);
+
+  const exportData = {session, record, related_events: related};
+  const raw = node("details");
+  raw.append(node("summary", "Raw JSON"), node("pre", JSON.stringify(exportData, null, 2)));
+  evidence.append(raw);
+  actions.append(button("Export evidence", () => download("evidence", exportData)));
+  view.replaceChildren(summary, fields, actions, evidence);
+}
+
+function showEvidence(record, source, session) {
+  renderEvidence($("detail-content"), record, source, session);
   $("detail").showModal();
+}
+
+function recordKey(record) {
+  return `${mode}/${record.alert_id ?? record.event_id}`;
+}
+
+function clearSelection() {
+  selection = null;
+  $("inspector-ref").textContent = "";
+  $("inspector-content").replaceChildren(node("p", "Select a record to inspect its evidence.", "empty"));
+}
+
+function selectRecord(record, source, bringIntoView = false) {
+  const session = source.stats.session;
+  selection = {key: recordKey(record), session};
+  const reference = record.rule ? `Alert #${record.alert_id}` : `Event #${record.event_id}`;
+  $("inspector-ref").textContent = reference;
+  renderEvidence($("inspector-content"), record, source, session);
+  $("inspector-content").scrollTop = 0;
+  for (const row of $("table-body").querySelectorAll("tr[data-record]")) {
+    const selected = row.dataset.record === selection.key;
+    row.dataset.selected = String(selected);
+    row.querySelector("button").setAttribute("aria-pressed", String(selected));
+  }
+  if (bringIntoView && window.matchMedia("(max-width: 1100px)").matches) {
+    $("inspector").scrollIntoView({block: "start"});
+    $("inspector-title").focus({preventScroll: true});
+  }
+}
+
+function resizePage(index = 0) {
+  pageIndex = index;
+  $("queue-scroll").scrollTop = 0;
+  renderFeed();
 }
 
 function renderFeed() {
   if ($("overview-view").hidden) return;
   const alerts = mode === "alerts";
-  const columns = alerts ? ["Time", "Severity", "Detection", "Process", "MITRE ATT&CK"] :
-    ["Time", "Type", "Activity", "Process", "UID"];
+  const columns = alerts ? ["Severity", "Time (UTC)", "Detection", "Process", "ATT&CK", "Review"] :
+    ["Type", "Time (UTC)", "Activity", "Process", "UID"];
   const header = node("tr");
   header.append(...columns.map((label) => node("th", label)));
   $("table-head").replaceChildren(header);
@@ -326,37 +398,65 @@ function renderFeed() {
       alerts ? record.detail : record.type, record.rule, record.mitre].join(" ").toLowerCase();
     return !query || text.includes(query);
   });
-  const rows = currentMatches.slice(0, 100).map((record) => {
+  if (alerts && $("sort-feed").value === "severity") {
+    currentMatches.sort((left, right) => levels.indexOf(left.severity) - levels.indexOf(right.severity));
+  }
+  pageIndex = Math.min(pageIndex, Math.max(0, Math.ceil(currentMatches.length / pageSize) - 1));
+  const first = pageIndex * pageSize;
+  const page = currentMatches.slice(first, first + pageSize);
+
+  if (selection?.session !== session || (selection && !selection.key.startsWith(mode + "/"))) clearSelection();
+  if (!selection && page.length) selectRecord(page[0], feed);
+
+  const displayedFeed = feed;
+  const rows = page.map((record) => {
     const row = node("tr");
+    row.dataset.record = recordKey(record);
+    row.dataset.selected = String(selection?.key === row.dataset.record);
     const timestamp = alerts ? new Date(record.timestamp) : new Date(record.ts * 1000);
-    const timeCell = node("td", formatTime.format(timestamp), "subtle");
+    const timeCell = node("td", formatTime.format(timestamp), "mono subtle");
     timeCell.title = timestamp.toISOString();
     const category = node("td");
     category.append(pill(alerts ? record.severity : record.type, record.severity));
     const title = node("td");
-    const currentFeed = feed;
-    title.append(button(alerts ? ruleName(record.rule) : eventDetail(record),
-      () => showEvidence(record, currentFeed, session), "cell-button"));
+    const open = button(alerts ? ruleName(record.rule) : eventDetail(record),
+      () => selectRecord(record, displayedFeed, true), "cell-button");
+    open.setAttribute("aria-pressed", row.dataset.selected);
+    title.append(open);
+    if (alerts) title.append(node("small", record.detail, "row-detail"));
+    title.append(node("small", `${record.comm} · ${record.pid}`, "mobile-process mono"));
+    const process = node("td", `${record.comm} · ${record.pid}`, "mono");
+    process.title = `${record.comm} · PID ${record.pid}`;
+    row.append(category, timeCell, title, process, node("td", alerts ? record.mitre : record.uid, "mono subtle"));
     if (alerts) {
-      title.append(node("small", record.detail));
-      if (reviewed.has(reviewId(record, session))) title.append(node("small", "Reviewed", "reviewed-label"));
+      const cell = node("td");
+      const isReviewed = reviewed.has(reviewId(record, session));
+      const label = node("span", undefined, "status-label");
+      label.dataset.reviewed = String(isReviewed);
+      label.append(node("i", undefined, "review-dot"), node("span", isReviewed ? "Reviewed" : "Unreviewed"));
+      cell.append(label);
+      row.append(cell);
     }
-    const process = node("td", `${record.comm} · ${record.pid}`);
-    row.append(timeCell, category, title, process, node("td", alerts ? record.mitre : record.uid, "subtle"));
+    row.addEventListener("click", (event) => {
+      if (!event.target.closest("button") && !window.getSelection().toString()) selectRecord(record, displayedFeed, true);
+    });
     return row;
   });
   if (!rows.length) {
     const row = node("tr");
     const cell = node("td", !feed ? "Waiting for sensor data…" :
       filterScope || records.length ? "No recent records match your filters." :
-        alerts ? "No alerts in this session. Run a simulation to verify a rule." :
-          "Waiting for the first kernel events.", "empty");
+        alerts ? "No alerts in this session." : "Waiting for the first kernel events.", "empty");
     cell.colSpan = columns.length;
     row.append(cell);
     rows.push(row);
   }
   $("table-body").replaceChildren(...rows);
-  $("feed-count").textContent = `${Math.min(currentMatches.length, 100)} shown · ${currentMatches.length} matching · ${records.length} recent ${mode}${paused ? " · Paused" : ""}`;
+  $("feed-count").textContent = page.length ?
+    `${first + 1}–${first + page.length} of ${currentMatches.length} matching${paused ? " · Paused" : ""}` :
+    `0 matching${paused ? " · Paused" : ""}`;
+  $("page-prev").disabled = pageIndex === 0;
+  $("page-next").disabled = first + pageSize >= currentMatches.length;
   $("export-feed").disabled = !currentMatches.length;
 }
 
@@ -366,17 +466,19 @@ function changeMode(next) {
   $("alert-tab").setAttribute("aria-pressed", String(alerts));
   $("event-tab").setAttribute("aria-pressed", String(!alerts));
   $("review-filter").hidden = !alerts;
+  $("sort-feed").hidden = !alerts;
   $("filter").setAttribute("aria-label", alerts ? "Filter by severity" : "Filter by event type");
   $("filter").replaceChildren(new Option(alerts ? "All severities" : "All event types", ""),
     ...(alerts ? levels : eventTypes).map((value) => new Option(value, value)));
   $("filter").value = filterByMode[mode];
-  renderFeed();
+  resizePage();
 }
 
 function setPaused(value) {
   paused = value;
   if (!paused) feed = snapshot;
-  $("pause").textContent = paused ? "Resume feed" : "Pause feed";
+  $("pause").querySelector("span").textContent = paused ? "Resume feed" : "Pause feed";
+  $("pause").querySelector("use").setAttribute("href", paused ? "#i-play" : "#i-pause");
   $("pause").setAttribute("aria-pressed", String(paused));
   renderFeed();
 }
@@ -435,35 +537,57 @@ function renderCoverage() {
   $("coverage-totals").textContent = stats ? `${observed} of ${rules.length} rules observed` : "Waiting for sensor counts";
   $("coverage-progress").max = Math.max(1, rules.length);
   $("coverage-progress").value = observed;
-  $("coverage-grid").replaceChildren(...rules.map((rule) => {
+  const table = node("table");
+  const headings = node("tr");
+  headings.append(...["Rule", "Severity", "ATT&CK", "Alerts", "Last seen (UTC)"].map((label) => node("th", label)));
+  const head = node("thead");
+  head.append(headings);
+  const rows = node("tbody");
+  rows.append(...rules.map((rule) => {
     const totals = activity[rule.name];
-    const card = node("article", undefined, "panel rule-card");
-    const meta = node("div", undefined, "rule-meta");
-    meta.append(pill(rule.severity, rule.severity), node("small", rule.mitre));
-    const details = node("div", undefined, "rule-details");
-    details.append(node("strong", totals ? `${formatNumber.format(totals.count)} ${totals.count === 1 ? "alert" : "alerts"}` :
-      stats ? "No alerts observed" : "Waiting for sensor"));
-    if (totals) details.append(node("small", `Last seen ${formatDate.format(new Date(totals.last_seen))}`));
-    card.append(meta, node("h2", ruleName(rule.name)), node("p", rule.description), details);
-    if (totals) card.append(button("View recent alerts", () => openFeed("alerts", {rule: rule.name}), "text-button"));
-    return card;
+    const name = node("td");
+    const severity = node("td");
+    name.append(totals
+      ? button(ruleName(rule.name), () => openFeed("alerts", {rule: rule.name}), "text-button")
+      : node("strong", ruleName(rule.name)),
+      node("small", rule.description));
+    severity.append(pill(rule.severity, rule.severity));
+    const row = node("tr");
+    row.append(name, severity, node("td", rule.mitre, "mono"),
+      node("td", stats ? formatNumber.format(totals?.count ?? 0) : "—", "mono"),
+      node("td", totals ? formatDate.format(new Date(totals.last_seen)) : "—", "subtle"));
+    return row;
   }));
+  table.append(head, rows);
+  $("coverage-grid").replaceChildren(table);
 }
 
 function setRunControls() {
-  $("run-suite").disabled = !simulationsEnabled || !scenarios?.length || running;
+  const picker = $("scenario-select");
+  const canRun = simulationsEnabled && Boolean(scenarios?.length) && !running;
+  picker.disabled = !localPreview && (!scenarios?.length || running);
+  $("run-selected").disabled = !canRun || !picker.value;
+  $("run-suite").disabled = !canRun;
   $("scenarios").querySelectorAll(".run-scenario").forEach((run) => { run.disabled = !simulationsEnabled || running; });
 }
 
 async function loadScenarios() {
   if (loadingScenarios) return;
-  loadingScenarios = true;
   const list = $("scenarios");
+  if (localPreview) {
+    $("scenario-preview").hidden = false;
+    list.hidden = true;
+    setRunControls();
+    return;
+  }
+  loadingScenarios = true;
   list.replaceChildren(node("p", "Loading scenarios…", "empty"));
   try {
     const response = await api("/api/simulations");
     scenarios = response.scenarios;
     simulationsEnabled = response.enabled;
+    $("scenario-select").replaceChildren(new Option("Select a scenario", ""),
+      ...scenarios.map((scenario) => new Option(scenario.title, scenario.id)));
     list.replaceChildren();
     if (!simulationsEnabled) list.append(node("p", "Browser simulations are disabled on this deployment.", "empty"));
     for (const scenario of scenarios) {
@@ -524,7 +648,7 @@ function addRun(entry) {
   $("export-runs").disabled = false;
   $("run-history").replaceChildren(...history.map((run) => {
     const row = button(undefined, () => showRun(run), "history-row");
-    row.append(node("strong", run.title), node("small", `${formatTime.format(new Date(run.completed_at))} · ${runOutcome(run)}`));
+    row.append(node("strong", run.title), node("small", `${formatTime.format(new Date(run.completed_at))} UTC · ${runOutcome(run)}`));
     return row;
   }));
   showRun(entry);
@@ -569,17 +693,20 @@ async function runScenarios(queue) {
   }
 }
 
-$("search").addEventListener("input", renderFeed);
+$("search").addEventListener("input", () => resizePage());
 $("filter").addEventListener("change", () => {
   filterByMode[mode] = $("filter").value;
-  renderFeed();
+  resizePage();
 });
-$("review-filter").addEventListener("change", renderFeed);
+$("review-filter").addEventListener("change", () => resizePage());
+$("sort-feed").addEventListener("change", () => resizePage());
+$("page-prev").addEventListener("click", () => resizePage(pageIndex - 1));
+$("page-next").addEventListener("click", () => resizePage(pageIndex + 1));
 $("alert-tab").addEventListener("click", () => changeMode("alerts"));
 $("event-tab").addEventListener("click", () => changeMode("events"));
 $("clear-scope").addEventListener("click", () => {
   scope = null;
-  renderFeed();
+  resizePage();
 });
 $("critical-filter").addEventListener("click", () => openFeed("alerts", null, "CRITICAL"));
 document.querySelectorAll("[data-severity]").forEach((item) =>
@@ -592,6 +719,18 @@ $("export-feed").addEventListener("click", () => download(mode, {
   })) : currentMatches
 }));
 $("export-runs").addEventListener("click", () => download("simulation-runs", {runs: history}));
+$("scenario-select").addEventListener("change", () => {
+  const selected = $("scenario-select").value;
+  if (localPreview) {
+    $("scenario-command").hidden = !selected;
+    $("scenario-command").textContent = selected ? `./attacks/run_local_attacks.sh ${selected}` : "";
+  }
+  setRunControls();
+});
+$("run-selected").addEventListener("click", () => {
+  const scenario = scenarios?.find((item) => item.id === $("scenario-select").value);
+  if (scenario) runScenarios([scenario]);
+});
 $("run-suite").addEventListener("click", () => runScenarios(scenarios));
 $("stop-suite").addEventListener("click", () => {
   stopRequested = true;
@@ -600,12 +739,69 @@ $("stop-suite").addEventListener("click", () => {
 });
 $("chart-range").addEventListener("change", drawChart);
 $("chart-metric").addEventListener("change", drawChart);
+$("sidebar-toggle").addEventListener("click", () => {
+  const toggle = $("sidebar-toggle");
+  const collapsed = toggle.getAttribute("aria-expanded") === "true";
+  $("app-shell").classList.toggle("sidebar-collapsed", collapsed);
+  toggle.setAttribute("aria-expanded", String(!collapsed));
+  toggle.setAttribute("aria-label", collapsed ? "Expand sidebar" : "Collapse sidebar");
+});
 window.addEventListener("hashchange", showPage);
 new ResizeObserver(drawChart).observe($("chart"));
+window.addEventListener("keydown", (event) => {
+  if (event.key === "/" && activePage() === "overview" && !$("detail").open &&
+      !event.target.closest("input, select, textarea, [contenteditable]")) {
+    event.preventDefault();
+    $("search").focus();
+  }
+});
+
+function setupPreview() {
+  const samples = [
+    ["cron_persistence", "MEDIUM", "T1053.003", "crontab", 31592, "OPEN", {path: "/var/spool/cron/crontabs/deploy"}, "Requested write access to a user crontab"],
+    ["netcat_execution", "MEDIUM", "T1059/T1071", "bash", 31714, "EXEC", {path: "/usr/bin/nc"}, "Requested execution of /usr/bin/nc"],
+    ["shell_profile_write", "MEDIUM", "T1546.004", "python3", 31981, "OPEN", {path: "/home/deploy/.bashrc"}, "Requested write access to /home/deploy/.bashrc"],
+    ["systemd_unit_write", "HIGH", "T1543.002", "python3", 31981, "OPEN", {path: "/etc/systemd/system/sync.service"}, "Requested write access to sync.service"],
+    ["ssh_private_key_access", "MEDIUM", "T1552.004", "tar", 32204, "OPEN", {path: "/home/deploy/.ssh/id_ed25519"}, "Requested read access to a private key"],
+    ["exec_from_tmp", "HIGH", "T1036/T1059", "bash", 32506, "EXEC", {path: "/tmp/update-agent"}, "Execution requested from a temporary directory"],
+    ["suspicious_port_connect", "HIGH", "T1071", "bash", 32506, "CONNECT",
+      {dst_ip: "198.51.100.24", dst_port: 4444, fd: 3, result: 0, socket_inode: "72418"}, "TCP connection to 198.51.100.24:4444"],
+    ["reverse_shell_pattern", "CRITICAL", "T1059/T1071", "bash", 32506, "DUP2",
+      {oldfd: 3, newfd: 1, socket_inode: "72418", connect_event_id: 7}, "TCP socket redirected to stdout after connecting to 198.51.100.24:4444"],
+  ];
+  const now = Math.floor(Date.now() / 1000);
+  const alerts = [];
+  const events = [];
+  const severity = Object.fromEntries(levels.map((level) => [level, 0]));
+  const ruleActivity = {};
+  rules = [];
+  samples.forEach(([rule, level, mitre, comm, pid, type, fields, detail], index) => {
+    const ts = now - (samples.length - index) * 11 - (index === samples.length - 1 ? 10 : 0);
+    const base = {comm, pid, ppid: 32411, uid: 1001, cgroup_id: "11483", process_start: pid * 1000};
+    const eventId = index + 1;
+    const timestamp = new Date(ts * 1000).toISOString();
+    events.unshift({...base, ...fields, ts, type, event_id: eventId, parent_comm: "sshd"});
+    alerts.unshift({...base, alert_id: eventId, event_id: eventId, timestamp, rule, severity: level,
+      mitre, detail, connect_event_id: fields.connect_event_id});
+    severity[level]++;
+    ruleActivity[rule] = {count: 1, last_seen: timestamp};
+    rules.push({name: rule, severity: level, mitre, description: detail});
+  });
+  const counts = [26, 34, 28, 40, 43, 30, 37, 33, 44, 40, 30, 37, 32, 40, 29, 38, 62, 45, 52, 91, 48, 39, 58, 28];
+  const activity = Array.from({length: 180}, (_, index) => [counts[index % counts.length], 0]);
+  for (const event of events) activity[179 - Math.floor((now - event.ts) / 5)][1]++;
+  stats = {events: activity.reduce((total, [count]) => total + count, 0), alerts: alerts.length, severity,
+    session: "sample-preview", activity_history: activity, dropped: 0, uptime_sec: 900,
+    rules: rules.length, rule_activity: ruleActivity};
+  snapshot = feed = {stats, alerts, events};
+}
+
+if (localPreview) setupPreview();
 changeMode(mode);
 showPage();
-if (location.protocol === "file:") {
-  status("offline", "Local file preview", "Open the dashboard through the Ubuntu VM’s published HTTP port to see telemetry and run simulations.");
+if (localPreview) {
+  status("preview", "Sample data", "Local preview with sample telemetry. Open the dashboard at the Ubuntu VM’s published address to monitor the sensor.");
+  renderStats();
 } else {
   refresh();
 }
