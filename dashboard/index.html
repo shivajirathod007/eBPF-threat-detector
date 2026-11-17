@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#151932">
+  <title>Runtime Watch · eBPF threat detector</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <svg class="symbols" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s7-3.5 7-10V5l-7-3-7 3v7c0 6.5 7 10 7 10Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+    <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3h6m-5 0v7l-6 9a1 1 0 0 0 1 2h14a1 1 0 0 0 1-2l-6-9V3M7.5 15h9"/></symbol>
+    <symbol id="i-chip" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9zM9 2v3m6-3v3m-6 14v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3"/></symbol>
+    <symbol id="i-wave" viewBox="0 0 24 24"><path d="M2 12h5l3-8 4 16 3-8h5"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="m10.3 4.4-8 14A1.8 1.8 0 0 0 3.9 21h16.2a1.8 1.8 0 0 0 1.6-2.6l-8-14a2 2 0 0 0-3.4 0ZM12 9v4m0 4h.01"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 12 7-12 7Z"/></symbol>
+    <symbol id="i-rules" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8m-8 4h8m-8 4h5"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M4 16v4h16v-4"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+  </svg>
+  <aside class="sidebar">
+    <a class="brand" href="#overview">
+      <span class="brand-icon"><svg><use href="#i-shield"/></svg></span>
+      <span><strong>Runtime Watch</strong><small>eBPF threat detector</small></span>
+    </a>
+    <nav aria-label="Main navigation">
+      <a href="#overview" aria-current="page"><svg><use href="#i-grid"/></svg> Overview</a>
+      <a href="#coverage"><svg><use href="#i-rules"/></svg> Rule coverage</a>
+      <a href="#lab"><svg><use href="#i-flask"/></svg> Simulation lab</a>
+    </nav>
+    <div class="sensor">
+      <svg><use href="#i-chip"/></svg>
+      <span><strong>Ubuntu kernel</strong><small id="probe-count">Checking sensor</small></span>
+    </div>
+  </aside>
+  <main>
+    <header class="topbar">
+      <span>Runtime monitoring <span aria-hidden="true">/</span> <strong id="breadcrumb">Overview</strong></span>
+      <span id="connection" class="connection" role="status" data-state="connecting"><i></i><span>Connecting</span></span>
+    </header>
+    <div class="workspace">
+      <div class="notice" id="connection-note" role="status" hidden></div>
+      <section id="overview-view">
+        <div class="heading hero">
+          <div><h1>Threat overview</h1><p>Live visibility into processes, files, and connections on your Ubuntu VM.</p>
+          <div class="hero-actions"><a class="button primary" href="#lab"><svg><use href="#i-flask"/></svg> Open simulation lab</a>
+          <a class="button hero-link" href="#coverage">Rule coverage <svg><use href="#i-arrow"/></svg></a></div></div>
+          <div class="hero-scope"><svg><use href="#i-chip"/></svg><div><small>Monitored host</small><strong>Ubuntu kernel</strong><span id="hero-sensor">Waiting for sensor</span></div></div>
+        </div>
+        <div class="metrics">
+          <article><span class="metric-icon teal"><svg><use href="#i-wave"/></svg></span><h2>Kernel events</h2><strong id="events-count">—</strong><small>Since sensor start</small></article>
+          <article><span class="metric-icon amber"><svg><use href="#i-alert"/></svg></span><h2>Total alerts</h2><strong id="alerts-count">—</strong><small id="rules-count">Observed rules</small></article>
+          <article><span class="metric-icon rose"><svg><use href="#i-shield"/></svg></span><h2>Critical alerts</h2><strong id="critical-count">—</strong><button class="text-button" id="critical-filter">Investigate <svg><use href="#i-arrow"/></svg></button></article>
+          <article><span class="metric-icon blue"><svg><use href="#i-clock"/></svg></span><h2>Sensor uptime</h2><strong id="uptime">—</strong><small id="lost-count">Checking perf buffer</small></article>
+        </div>
+        <div class="analytics">
+          <article class="panel activity">
+            <div class="panel-heading"><div><h2>Kernel activity</h2><p id="chart-unit">Events per five seconds</p></div>
+              <div class="chart-controls">
+                <select id="chart-metric" aria-label="Chart metric"><option value="0">Events</option><option value="1">Alerts</option></select>
+                <select id="chart-range" aria-label="Chart time range"><option value="2">Last 2 min</option><option value="5">Last 5 min</option><option value="15">Last 15 min</option></select>
+              </div>
+            </div>
+            <canvas id="chart" aria-label="Kernel events over the last two minutes" role="img"></canvas>
+            <div class="chart-axis"><span id="chart-from">2 min ago</span><span>Now</span></div>
+          </article>
+          <article class="panel severity">
+            <div class="panel-heading"><div><h2>Alert severity</h2><p>Current sensor session</p></div></div>
+            <div id="severity-track" class="severity-track" aria-hidden="true">
+              <span data-level="CRITICAL"></span><span data-level="HIGH"></span><span data-level="MEDIUM"></span><span data-level="LOW"></span>
+            </div>
+            <ul class="severity-list">
+              <li><button data-severity="CRITICAL"><span class="level-dot" data-level="CRITICAL"></span>Critical<strong id="severity-CRITICAL">—</strong></button></li>
+              <li><button data-severity="HIGH"><span class="level-dot" data-level="HIGH"></span>High<strong id="severity-HIGH">—</strong></button></li>
+              <li><button data-severity="MEDIUM"><span class="level-dot" data-level="MEDIUM"></span>Medium<strong id="severity-MEDIUM">—</strong></button></li>
+              <li><button data-severity="LOW"><span class="level-dot" data-level="LOW"></span>Low<strong id="severity-LOW">—</strong></button></li>
+            </ul>
+          </article>
+        </div>
+        <article class="panel feed" id="investigation">
+          <div class="panel-heading">
+            <div><h2>Investigation feed</h2><p>Select a record to inspect the kernel evidence.</p></div>
+            <div class="actions"><button class="button quiet" id="pause" type="button" aria-pressed="false">Pause feed</button>
+            <button class="button quiet" id="export-feed" type="button" disabled><svg><use href="#i-download"/></svg> Export JSON</button></div>
+          </div>
+          <div class="feed-toolbar">
+            <div class="tabs" aria-label="Telemetry view">
+              <button id="alert-tab" aria-pressed="true">Alerts</button>
+              <button id="event-tab" aria-pressed="false">Kernel events</button>
+            </div>
+            <div class="filters">
+              <label class="search"><svg><use href="#i-search"/></svg><input id="search" type="search" aria-label="Search records" placeholder="Search rule, process, PID…"></label>
+              <select id="filter" aria-label="Filter by severity"></select>
+              <select id="review-filter" aria-label="Review status"><option value="">All statuses</option><option value="new">Unreviewed</option><option value="reviewed">Reviewed</option></select>
+            </div>
+          </div>
+          <div id="scope" class="feed-scope" hidden><span id="scope-label"></span><button id="clear-scope" class="text-button">Clear filter</button></div>
+          <div class="table-wrap" tabindex="0" aria-label="Investigation records"><table><thead id="table-head"></thead><tbody id="table-body"></tbody></table></div>
+          <div class="feed-footer" id="feed-count"></div>
+        </article>
+      </section>
+      <section id="coverage-view" hidden>
+        <div class="heading">
+          <div><h1>Rule coverage</h1><p>See which detection rules have fired since the sensor started.</p></div>
+          <a class="button primary" href="#lab"><svg><use href="#i-flask"/></svg> Run a simulation</a>
+        </div>
+        <div class="coverage-summary panel">
+          <div><h2 id="coverage-totals">Loading rule coverage…</h2><p>Counts include alerts outside the recent feed.</p></div>
+          <progress id="coverage-progress" max="1" value="0" aria-label="Rules observed"></progress>
+        </div>
+        <div class="coverage-grid" id="coverage-grid"></div>
+      </section>
+      <section id="lab-view" hidden>
+        <div class="heading">
+          <div><h1>Simulation lab</h1><p>Trigger real Linux syscalls in the simulator and check which detections the sensor observes.</p></div>
+          <div class="actions">
+            <button id="run-suite" class="button primary" disabled><svg><use href="#i-play"/></svg> Run all scenarios</button>
+            <button id="stop-suite" class="button quiet" hidden>Stop after current</button>
+          </div>
+        </div>
+        <div id="suite-progress" class="panel suite-progress" hidden>
+          <span id="suite-status" role="status"></span><progress id="suite-bar" value="0" max="1" aria-label="Scenario suite progress"></progress>
+        </div>
+        <div class="lab-layout">
+          <article class="panel">
+            <div class="panel-heading"><div><h2>Scenarios</h2><p>Each drill runs in the unprivileged simulation container.</p></div></div>
+            <div id="scenarios"><p class="empty">Loading scenarios…</p></div>
+          </article>
+          <div class="lab-results">
+            <article class="panel results">
+              <div class="panel-heading"><div><h2>Run details</h2><p>Expected rules and observed evidence</p></div></div>
+              <div id="run-result" role="status"><p class="empty">Choose a scenario to start a run.</p></div>
+            </article>
+            <article class="panel">
+              <div class="panel-heading"><div><h2>Run history</h2><p>Runs from this dashboard tab</p></div>
+                <button class="button quiet" id="export-runs" disabled><svg><use href="#i-download"/></svg> Export JSON</button>
+              </div>
+              <div id="run-history"><p class="empty">No runs yet.</p></div>
+            </article>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+  <dialog id="detail" aria-labelledby="detail-title">
+    <form method="dialog"><button class="button quiet" aria-label="Close evidence">Close</button></form>
+    <h2 id="detail-title">Kernel evidence</h2>
+    <div class="actions evidence-actions" id="detail-actions"></div>
+    <div id="detail-content"></div>
+  </dialog>
+</body>
+</html>

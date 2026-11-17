@@ -1,0 +1,41 @@
+rules:
+  - name: shell_from_webserver
+    description: "A shell process was spawned by a web-server-like parent process"
+    severity: CRITICAL
+    mitre: T1059
+  - name: exec_from_tmp
+    description: "A binary was executed from a world-writable directory (/tmp, /dev/shm, /var/tmp)"
+    severity: HIGH
+    mitre: T1036/T1059
+  - name: netcat_execution
+    description: "netcat/ncat executed - commonly used for reverse/bind shells"
+    severity: MEDIUM
+    mitre: T1059/T1071
+  - name: sensitive_file_read
+    description: "A non-root process attempted to open a sensitive credential file for reading"
+    severity: HIGH
+    mitre: T1003
+  - name: ssh_key_tampering
+    description: "A process attempted to open .ssh/authorized_keys for writing"
+    severity: HIGH
+    mitre: T1098
+  - name: cron_persistence
+    description: "A process attempted to open a crontab or cron path for writing"
+    severity: MEDIUM
+    mitre: T1053.003
+  - name: suspicious_port_connect
+    description: "Outbound connection to a commonly used C2/reverse-shell port"
+    severity: HIGH
+    mitre: T1071
+  - name: reverse_shell_pattern
+    description: "A TCP socket descriptor was redirected onto a standard stream within three seconds"
+    severity: CRITICAL
+    mitre: T1059/T1071
+  - name: privilege_escalation
+    description: "A non-root process requested setuid(0)"
+    severity: CRITICAL
+    mitre: T1548/T1068
+  - name: ptrace_usage
+    description: "ptrace() used on another process - possible code injection / credential dumping"
+    severity: MEDIUM
+    mitre: T1055

@@ -70,6 +70,13 @@ The dashboard is a single-user lab interface with HTTP and no login. Bind it to 
 4. Select a detection to inspect the triggering event. The reverse-shell alert also links its preceding TCP connection. Raw event evidence is available while it remains in the recent event buffer.
 5. Use the Alerts or Kernel events view to search by process, rule, or PID. The feed can be paused while session metrics continue updating.
 
+## Investigate and export a session
+
+- Switch between events and alerts in the activity chart and select a 2-, 5-, or 15-minute window.
+- Select a severity to filter the recent alerts. Open an alert to mark it reviewed, jump to recent events from that process, or export the available evidence. Review marks are stored in the current browser and scoped to the sensor session. Export JSON on the feed downloads all matching buffered records.
+- Open **Rule coverage** for per-rule alert totals and last-seen times since sensor start. Select an observed rule to find its recent alerts.
+- In **Simulation lab**, select **Run all scenarios** to queue the drills one at a time. You can stop after the current drill. The run history keeps up to 30 results in the current dashboard tab, with a JSON export for saving the report.
+
 The simulation service runs as UID 10001 with dropped Linux capabilities, a read-only root filesystem, and a temporary scratch directory. Its nine drills cover all ten rules. They use real syscalls, temporary SSH-key and cron files, and a local TCP connection. Browser runs report both the command exit status and the expected rules observed for that run.
 
 To trigger the same activity from your host or Kali machine **against the Ubuntu VM itself**, SSH into Ubuntu as an unprivileged user and run the project script there. Configure `openssh-server` on the VM if you want this workflow. The dashboard’s older browser SSH terminal has been replaced by the simulation lab. Use your SSH client for interactive host commands.
@@ -98,7 +105,7 @@ The probes observe `execve`, `openat`, IPv4 TCP connections, `dup2`/`dup3`, `set
 
 The reverse-shell heuristic uses a successful or in-progress TCP connect and a successful redirection of the same descriptor number onto stdin, stdout or stderr from the same process within three seconds. The critical alert links both events. Rapid descriptor reuse can lead to a false match. Coverage is limited to these observed syscall patterns, including IPv4 for socket telemetry. Relative paths opened through directory descriptors may lack enough context to match. Inbound scans and SSH authentication failures require telemetry outside these probes.
 
-The API provides `GET /api/health`, `/api/stats`, `/api/snapshot`, `/api/events`, `/api/alerts`, and `/api/simulations`. Browser drills use `POST /api/attack/<scenario>` with the `X-Lab-Action: simulate` header.
+The API provides `GET /api/health`, `/api/stats`, `/api/snapshot`, `/api/events`, `/api/alerts`, `/api/rules`, and `/api/simulations`. Browser drills use `POST /api/attack/<scenario>` with the `X-Lab-Action: simulate` header.
 
 ## Troubleshooting
 
