@@ -14,7 +14,7 @@ rules:
   - name: sensitive_file_read
     description: "A non-root process attempted to open a sensitive credential file for reading"
     severity: HIGH
-    mitre: T1003
+    mitre: T1003.008
   - name: ssh_key_tampering
     description: "A process attempted to open .ssh/authorized_keys for writing"
     severity: HIGH
@@ -28,7 +28,7 @@ rules:
     severity: HIGH
     mitre: T1071
   - name: reverse_shell_pattern
-    description: "A TCP socket descriptor was redirected onto a standard stream within three seconds"
+    description: "The same TCP socket was connected and redirected onto a standard stream within three seconds"
     severity: CRITICAL
     mitre: T1059/T1071
   - name: privilege_escalation
@@ -39,3 +39,58 @@ rules:
     description: "ptrace() used on another process - possible code injection / credential dumping"
     severity: MEDIUM
     mitre: T1055
+  - name: systemd_unit_write
+    description: "A process requested write access to a systemd service unit or service drop-in"
+    severity: HIGH
+    mitre: T1543.002
+    match:
+      event: OPEN
+      access: write
+      path_regex: '(?:(?:/etc|/run|/usr/lib|/lib)/systemd/(?:system|user)/|/(?:[^/]+/)*\.config/systemd/user/)(?:[^/]+/)*[^/]+\.service(?:\.d/[^/]+\.conf)?'
+  - name: dynamic_loader_tampering
+    description: "A process requested write access to the global dynamic linker preload file"
+    severity: CRITICAL
+    mitre: T1574.006
+    match:
+      event: OPEN
+      access: write
+      path_regex: '/etc/ld\.so\.preload'
+  - name: sudoers_write
+    description: "A process requested write access to sudo policy files"
+    severity: HIGH
+    mitre: T1548.003
+    match:
+      event: OPEN
+      access: write
+      path_regex: '/etc/sudoers(?:\.d/[^/]+)?'
+  - name: shell_profile_write
+    description: "A process requested write access to a shell startup profile"
+    severity: MEDIUM
+    mitre: T1546.004
+    match:
+      event: OPEN
+      access: write
+      path_regex: '/etc/(?:profile|bash\.bashrc|profile\.d/[^/]+\.sh|zsh/(?:zshenv|zprofile|zshrc|zlogin))|(?:[^/]+/|/)*\.(?:bashrc|bash_profile|bash_login|profile|zshenv|zprofile|zshrc|zlogin)'
+  - name: ssh_private_key_access
+    description: "A process requested read access to a conventional private key filename under .ssh"
+    severity: MEDIUM
+    mitre: T1552.004
+    match:
+      event: OPEN
+      access: read
+      path_regex: '(?:[^/]+/|/)*\.ssh/id_(?:rsa|dsa|ecdsa(?:_sk)?|ed25519(?:_sk)?)'
+  - name: proc_memory_access
+    description: "A process requested read access to a numeric PID memory file in /proc"
+    severity: HIGH
+    mitre: T1003.007
+    match:
+      event: OPEN
+      access: read
+      path_regex: '/proc/[1-9][0-9]*/mem'
+  - name: ptrace_memory_write
+    description: "A process requested PTRACE_POKETEXT or PTRACE_POKEDATA on a target PID"
+    severity: HIGH
+    mitre: T1055.008
+    match:
+      event: PTRACE
+      requests: [4, 5]

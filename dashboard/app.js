@@ -54,6 +54,7 @@ function button(text, action, className = "button quiet") {
 }
 
 async function api(path, options) {
+  if (location.protocol === "file:") throw new Error("Open the dashboard through the Ubuntu VM’s published HTTP port.");
   const response = await fetch(path, {signal: AbortSignal.timeout(17000), ...options});
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
@@ -195,10 +196,13 @@ function eventDetail(record) {
   switch (record.type) {
     case "EXEC":
     case "OPEN": return record.path || "Path unavailable";
-    case "CONNECT": return `${record.dst_ip}:${record.dst_port} · FD ${record.fd} · result ${record.result}`;
+    case "CONNECT": {
+      const address = record.dst_ip.includes(":") ? `[${record.dst_ip}]` : record.dst_ip;
+      return `${address}:${record.dst_port} · FD ${record.fd} · result ${record.result}`;
+    }
     case "DUP2": return `FD ${record.oldfd} → FD ${record.newfd}`;
     case "SETUID": return `Requested UID ${record.new_uid}`;
-    case "PTRACE": return `Target PID ${record.target_pid} · request ${record.request}`;
+    case "PTRACE": return `Target namespace PID ${record.target_pid} · request ${record.request}`;
     default: return "Details unavailable";
   }
 }
@@ -600,4 +604,8 @@ window.addEventListener("hashchange", showPage);
 new ResizeObserver(drawChart).observe($("chart"));
 changeMode(mode);
 showPage();
-refresh();
+if (location.protocol === "file:") {
+  status("offline", "Local file preview", "Open the dashboard through the Ubuntu VM’s published HTTP port to see telemetry and run simulations.");
+} else {
+  refresh();
+}

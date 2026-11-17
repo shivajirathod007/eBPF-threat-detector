@@ -23,7 +23,21 @@ SCENARIOS = {
     "ptrace_usage": ("Process tracing", "Attempt to trace a temporary child process.", ["ptrace_usage"]),
     "shell_from_webserver": ("Shell from Python", "Have a Python parent launch a shell that immediately exits.", ["shell_from_webserver"]),
     "reverse_shell": ("Reverse-shell behavior", "Connect to a local TCP listener and duplicate the socket onto stdout.", ["suspicious_port_connect", "reverse_shell_pattern"]),
+    "systemd_unit_write": ("Systemd service write attempt", "Request a writable descriptor for an absent service unit.", ["systemd_unit_write"]),
+    "dynamic_loader_tampering": ("Dynamic linker preload attempt", "Try opening /etc/ld.so.preload for writing, without changing it.", ["dynamic_loader_tampering"]),
+    "sudoers_write": ("Sudo policy write attempt", "Try opening /etc/sudoers for writing, without changing it.", ["sudoers_write"]),
+    "shell_profile_write": ("Shell startup profile", "Write a comment into a disposable .bashrc fixture.", ["shell_profile_write"]),
+    "ssh_private_key_access": ("SSH private key access", "Open a disposable file with a conventional SSH private key name.", ["ssh_private_key_access"]),
+    "proc_memory_access": ("Process memory access", "Try opening the memory file of a disposable child process.", ["proc_memory_access"]),
+    "ptrace_memory_write": ("Ptrace memory write attempt", "Issue a write request to an invalid address in a disposable, unattached process.", ["ptrace_usage", "ptrace_memory_write"]),
 }
+
+PROTECTED_PATHS = {
+    "systemd_unit_write": "/etc/systemd/system/runtime-watch-lab.service",
+    "dynamic_loader_tampering": "/etc/ld.so.preload",
+    "sudoers_write": "/etc/sudoers",
+}
+LOOPBACK_PORTS = (4444, 1337, 31337, 9001, 6666)
 
 
 def mark_process(tag):
@@ -31,6 +45,28 @@ def mark_process(tag):
     if libc.prctl(15, ctypes.c_char_p(tag.encode()), 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "Could not mark simulation process")
     return libc
+
+
+def attempt_open(path, flags):
+    try:
+        os.close(os.open(path, flags | os.O_NOFOLLOW))
+    except OSError as error:
+        if error.errno not in (errno.EACCES, errno.EPERM, errno.ENOENT, errno.EROFS, errno.ELOOP):
+            raise
+        print(f"Open attempt for {path}: {error.strerror}.")
+    else:
+        print(f"Opened and closed {path} without reading or writing contents.")
+
+
+def bind_test_listener(listener):
+    for port in LOOPBACK_PORTS:
+        try:
+            listener.bind(("127.0.0.1", port))
+            return port
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                raise
+    raise OSError(errno.EADDRINUSE, "All test listener ports are occupied")
 
 
 def run_scenario(name, tag, directory):
@@ -44,10 +80,7 @@ def run_scenario(name, tag, directory):
 
     libc = mark_process(tag)
     if name == "sensitive_file_read":
-        try:
-            os.close(os.open("/etc/shadow", os.O_RDONLY))
-        except PermissionError:
-            print("The kernel denied the expected /etc/shadow open attempt.")
+        attempt_open("/etc/shadow", os.O_RDONLY)
     elif name == "exec_from_tmp":
         executable = directory / "demo-executable"
         shutil.copy("/bin/echo", executable)
@@ -79,15 +112,19 @@ def run_scenario(name, tag, directory):
                     os.waitpid(child.pid, os.WUNTRACED)
                     if libc.ptrace(17, child.pid, None, None) != 0:
                         raise OSError(ctypes.get_errno(), "Could not detach from the test process")
-                elif ctypes.get_errno() != errno.EPERM:
-                    raise OSError(ctypes.get_errno(), "ptrace attach failed")
+                else:
+                    error = ctypes.get_errno()
+                    if error != errno.EPERM:
+                        raise OSError(error, "ptrace attach failed")
+                    print("The kernel denied the ptrace attach request.")
             finally:
                 child.kill()
     elif name == "reverse_shell":
         with socket.socket() as listener, socket.socket() as client:
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listener.bind(("127.0.0.1", 4444))
+            port = bind_test_listener(listener)
             listener.listen(1)
+            listener.settimeout(2)
             client.settimeout(2)
             client.connect(listener.getsockname())
             with listener.accept()[0] as peer:
@@ -101,7 +138,30 @@ def run_scenario(name, tag, directory):
                     os.close(saved)
                 if not peer.recv(128):
                     raise RuntimeError("The test listener received no data.")
-                print("The local listener received the test message.")
+                print(f"The local listener received the test message on port {port}.")
+    elif name in PROTECTED_PATHS:
+        attempt_open(PROTECTED_PATHS[name], os.O_WRONLY)
+    elif name == "shell_profile_write":
+        (directory / ".bashrc").write_text("# Disposable profile fixture\n")
+    elif name == "ssh_private_key_access":
+        keys = directory / ".ssh"
+        keys.mkdir(mode=0o700)
+        key = keys / "id_ed25519"
+        key.touch(mode=0o600)
+        os.close(os.open(key, os.O_RDONLY))
+    elif name in {"proc_memory_access", "ptrace_memory_write"}:
+        with subprocess.Popen(["/bin/sleep", "5"]) as child:
+            try:
+                if name == "proc_memory_access":
+                    attempt_open(f"/proc/{child.pid}/mem", os.O_RDONLY)
+                elif libc.ptrace(5, child.pid, None, None) != -1:
+                    raise RuntimeError("An unexpected ptrace write succeeded")
+                else:
+                    print(f"The ptrace memory write request failed: {os.strerror(ctypes.get_errno())}.")
+            finally:
+                child.kill()
+    else:
+        raise ValueError(f"Unknown simulation {name}")
     return 0
 
 
@@ -118,7 +178,10 @@ def launch(name, tag):
                     output = "Netcat help command ran."
                 return {"exit_code": child.returncode, "output": output.strip()[:2000]}
             except subprocess.TimeoutExpired:
-                os.killpg(child.pid, signal.SIGKILL)
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 child.communicate()
                 return {"exit_code": 124, "output": "The drill exceeded its execution deadline."}
 

@@ -12,7 +12,6 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import signal
 import socket
-import struct
 from threading import Event, Lock, Thread
 import time
 from uuid import uuid4
@@ -26,6 +25,26 @@ BASE = Path(__file__).resolve().parent.parent
 EVENT_NAMES = {1: "EXEC", 2: "OPEN", 3: "CONNECT", 4: "DUP2", 5: "SETUID", 6: "PTRACE"}
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 ACTIVITY_BUCKETS = 180  # Fifteen minutes in five-second intervals
+
+
+def load_rules(path):
+    with path.open() as file:
+        data = yaml.safe_load(file)
+    if not isinstance(data, dict) or not isinstance(data.get("rules"), list):
+        raise ValueError(f"{path} must contain a rules list")
+    rules = {}
+    for entry in data["rules"]:
+        if not isinstance(entry, dict) or not all(
+            isinstance(entry.get(key), str) and entry[key].strip() for key in ("name", "description", "severity", "mitre")
+        ):
+            raise ValueError(f"{path}: every rule needs a name, description, severity and MITRE ID")
+        name = entry["name"]
+        if name in rules:
+            raise ValueError(f"{path}: duplicate rule {name}")
+        if entry["severity"] not in SEVERITIES:
+            raise ValueError(f"{path}: invalid severity for {name}")
+        rules[name] = entry
+    return rules
 
 
 def json_log(name):
@@ -54,7 +73,8 @@ def normalize(raw, wall_offset):
     if event_type == "OPEN":
         event["flags"] = raw.arg1
     elif event_type == "CONNECT":
-        event.update(fd=raw.arg1, dst_ip=socket.inet_ntoa(struct.pack("=I", raw.ipv4)),
+        address = bytes(raw.address[:4 if raw.family == socket.AF_INET else 16])
+        event.update(fd=raw.arg1, dst_ip=socket.inet_ntop(raw.family, address),
                      dst_port=socket.ntohs(raw.arg2), result=raw.result)
     elif event_type == "DUP2":
         event.update(oldfd=raw.arg1, newfd=raw.arg2)
@@ -62,6 +82,8 @@ def normalize(raw, wall_offset):
         event["new_uid"] = raw.arg1
     elif event_type == "PTRACE":
         event.update(request=raw.arg1, target_pid=raw.arg2)
+    if event_type in ("CONNECT", "DUP2") and raw.socket_inode:
+        event["socket_inode"] = str(raw.socket_inode)
     return event
 
 
@@ -76,11 +98,10 @@ class Telemetry:
         self.stats = Counter(events=0, alerts=0, dropped=0)
         self.severity = dict.fromkeys(SEVERITIES, 0)
         self.activity = OrderedDict()
-        self.detector = Detector()
         self.alert_log = alert_log
         self.event_log = event_log
-        with (BASE / "rules/rules.yaml").open() as file:
-            self.rules = {rule["name"]: rule for rule in yaml.safe_load(file)["rules"]}
+        self.rules = load_rules(BASE / "rules/rules.yaml")
+        self.detector = Detector(self.rules)
         self.rule_activity = {}
         self.probes = 0
         self.drills = {}
@@ -123,12 +144,16 @@ class Telemetry:
         self.alerts.appendleft(alert)
         drill = self.drills.get(alert["comm"])
         if drill is not None and rule_key in drill["expected"]:
-            drill["alerts"].setdefault(rule_key, alert)
-            drill["events"][event["event_id"]] = event
-            connection = next((item for item in self.events
-                               if item["event_id"] == event.get("connect_event_id")), None)
-            if connection:
-                drill["events"][connection["event_id"]] = connection
+            if rule_key not in drill["alerts"]:
+                drill["alerts"][rule_key] = alert
+                drill["events"][event["event_id"]] = event
+                connection_id = event.get("connect_event_id")
+                if connection_id and connection_id not in drill["events"]:
+                    connection = next((item for item in self.events if item["event_id"] == connection_id), None)
+                    if connection:
+                        drill["events"][connection_id] = connection
+                if len(drill["alerts"]) == len(drill["expected"]):
+                    drill["observed"].set()
         return alert
 
     def lost(self, count):
@@ -159,23 +184,38 @@ def monitor(telemetry, stop):
     source = BASE / "agent/probes.c"
     bpf = BPF(src_file=str(source), cflags=[f"-DSENSOR_PID={os.getpid()}"])
     try:
-        for name in ("execve", "openat", "setuid", "ptrace", "connect", "dup2", "dup3"):
+        syscalls = ("execve", "execveat", "open", "openat", "openat2", "creat",
+                    "setuid", "ptrace", "connect", "dup2", "dup3")
+        for name in syscalls:
             bpf.attach_kprobe(event=bpf.get_syscall_fnname(name), fn_name=f"syscall__{name}")
         bpf.attach_kprobe(event="tcp_v4_connect", fn_name="trace_tcp4")
-        bpf.attach_kretprobe(event=bpf.get_syscall_fnname("connect"), fn_name="connect_return")
+        with open("/proc/kallsyms", "rb") as symbols:
+            ipv6 = any(line.split()[2] == b"tcp_v6_connect" for line in symbols)
+        if ipv6:
+            bpf.attach_kprobe(event="tcp_v6_connect", fn_name="trace_tcp6")
+        else:
+            logging.warning("tcp_v6_connect is unavailable. Socket monitoring covers IPv4.")
+        bpf.attach_kretprobe(event=bpf.get_syscall_fnname("connect"), fn_name="connect_return", maxactive=256)
         for name in ("dup2", "dup3"):
-            bpf.attach_kretprobe(event=bpf.get_syscall_fnname(name), fn_name="dup_return")
+            bpf.attach_kretprobe(event=bpf.get_syscall_fnname(name), fn_name="dup_return", maxactive=128)
 
         buffer = bpf["events"]
         pending = []
         arrival_order = count()
+        decode_error = None
 
         def handle_event(cpu, data, size):
-            event = normalize(buffer.event(data), telemetry.wall_offset)
+            nonlocal decode_error
+            try:
+                event = normalize(buffer.event(data), telemetry.wall_offset)
+            except Exception as error:
+                # ctypes swallows exceptions escaping Python perf callbacks.
+                decode_error = error
+                return
             heappush(pending, (event["ktime_ns"], next(arrival_order), event))
 
         buffer.open_perf_buffer(handle_event, page_cnt=64, lost_cb=telemetry.lost)
-        telemetry.probes = 11
+        telemetry.probes = len(syscalls) + 4 + int(ipv6)
         with Dashboard(telemetry, BASE / "dashboard", int(os.environ.get("PORT", "8080"))) as server:
             logging.info("Attached %s probes. Dashboard listening on port %s.", telemetry.probes, server.server_port)
             thread = Thread(target=server.serve_forever, daemon=True)
@@ -183,6 +223,8 @@ def monitor(telemetry, stop):
             try:
                 while not stop.is_set():
                     bpf.perf_buffer_poll(timeout=50)
+                    if decode_error is not None:
+                        raise RuntimeError("Could not decode a kernel event") from decode_error
                     # Perf buffers drain per CPU. Briefly reorder records by their kernel timestamp.
                     watermark = time.monotonic_ns() - 50_000_000
                     while pending and (pending[0][0] <= watermark or len(pending) > 4096):

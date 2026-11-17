@@ -5,7 +5,6 @@
 #include <linux/fdtable.h>
 #include <linux/fs.h>
 #include <linux/fcntl.h>
-#include <linux/errno.h>
 
 enum event_type { EXEC = 1, OPEN, CONNECT, DUP2, SETUID, PTRACE };
 
@@ -29,6 +28,7 @@ struct data_t {
 };
 
 struct endpoint {
+    u64 socket_inode;
     int fd;
     u16 port;
     u16 family;
@@ -38,6 +38,7 @@ struct endpoint {
 struct redirection {
     u32 oldfd;
     u32 newfd;
+    u64 socket_inode;
 };
 
 BPF_PERF_OUTPUT(events);
@@ -124,7 +125,7 @@ static __always_inline u64 get_socket_inode(u32 fd) {
 int syscall__connect(struct pt_regs *ctx, int fd) {
     if (is_sensor()) return 0;
     u64 thread = bpf_get_current_pid_tgid();
-    struct endpoint peer = {.fd = fd};
+    struct endpoint peer = {.fd = fd, .socket_inode = get_socket_inode(fd)};
     endpoints.update(&thread, &peer);
     return 0;
 }
@@ -172,8 +173,8 @@ int connect_return(struct pt_regs *ctx) {
         data.family = peer->family;
         __builtin_memcpy(data.address, peer->address, sizeof(data.address));
         data.result = PT_REGS_RC(ctx);
-        if (data.result == 0 || data.result == -EINPROGRESS)
-            data.socket_inode = get_socket_inode(peer->fd);
+        if (peer->socket_inode && get_socket_inode(peer->fd) == peer->socket_inode)
+            data.socket_inode = peer->socket_inode;
         events.perf_submit(ctx, &data, sizeof(data));
     }
     endpoints.delete(&thread);
@@ -187,7 +188,7 @@ static __always_inline int track_dup(u32 oldfd, u32 newfd) {
         redirections.delete(&thread);
         return 0;
     }
-    struct redirection fds = {oldfd, newfd};
+    struct redirection fds = {oldfd, newfd, get_socket_inode(oldfd)};
     redirections.update(&thread, &fds);
     return 0;
 }
@@ -209,7 +210,8 @@ int dup_return(struct pt_regs *ctx) {
         identify(&data, DUP2);
         data.arg1 = fds->oldfd;
         data.arg2 = fds->newfd;
-        data.socket_inode = get_socket_inode(fds->newfd);
+        if (fds->socket_inode && get_socket_inode(fds->newfd) == fds->socket_inode)
+            data.socket_inode = fds->socket_inode;
         events.perf_submit(ctx, &data, sizeof(data));
     }
     redirections.delete(&thread);

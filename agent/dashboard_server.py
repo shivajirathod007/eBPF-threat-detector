@@ -2,12 +2,13 @@
 
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 import os
 from secrets import token_hex
 from pathlib import Path
-from threading import Lock
-import time
+from threading import Event, Lock
 from urllib.error import URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from attacks.scenarios import SCENARIOS
@@ -18,9 +19,26 @@ ASSETS = {
     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
 }
 
+def lab_host(value):
+    if not value or any(character.isspace() for character in value):
+        return False
+    try:
+        url = urlsplit(f"//{value}")
+        if not url.hostname or url.username is not None or url.path or url.query or url.fragment:
+            return False
+        port = url.port  # Validate the port if one was supplied.
+        if port == 0:
+            return False
+        return url.hostname == "localhost" or bool(ip_address(url.hostname))
+    except ValueError:
+        return False
+
 
 class Dashboard(ThreadingHTTPServer):
     def __init__(self, telemetry, assets: Path, port):
+        missing = {rule for _, _, expected in SCENARIOS.values() for rule in expected} - telemetry.rules.keys()
+        if missing:
+            raise ValueError(f"Simulation rules are missing: {', '.join(sorted(missing))}")
         self.telemetry = telemetry
         self.assets = assets
         self.simulator_url = os.getenv("SIMULATOR_URL", "")
@@ -35,7 +53,7 @@ class Dashboard(ThreadingHTTPServer):
         tag = "lab-" + token_hex(5)
         expected = SCENARIOS[name][2]
         telemetry = self.telemetry
-        drill = {"expected": expected, "alerts": {}, "events": {}}
+        drill = {"expected": expected, "alerts": {}, "events": {}, "observed": Event()}
         with telemetry.lock:
             telemetry.drills[tag] = drill
         try:
@@ -45,12 +63,7 @@ class Dashboard(ThreadingHTTPServer):
                     result = json.load(response)
             except (URLError, OSError, ValueError):
                 return {"error": "The simulation container did not return a result. Check its Compose logs."}, 502
-            deadline = time.monotonic() + 2.5
-            while time.monotonic() < deadline:
-                with telemetry.lock:
-                    if len(drill["alerts"]) == len(expected):
-                        break
-                time.sleep(0.05)
+            drill["observed"].wait(timeout=2.5)
             with telemetry.lock:
                 return {
                     **result, "scenario": name, "process": tag, "session": telemetry.session, "expected_rules": expected,
@@ -85,6 +98,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_body(json.dumps(payload).encode(), "application/json", status)
 
     def do_GET(self):
+        if not lab_host(self.headers.get("Host")):
+            self.send_json({"error": "Open the dashboard with the Ubuntu VM IP address or localhost."}, 403)
+            return
         path = self.path.split("?", 1)[0]
         telemetry = self.server.telemetry
         if path in ASSETS:
@@ -113,6 +129,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "Route not found."}, 404)
 
     def do_POST(self):
+        if not lab_host(self.headers.get("Host")):
+            self.send_json({"error": "Open the dashboard with the Ubuntu VM IP address or localhost."}, 403)
+            return
         name = self.path.removeprefix("/api/attack/")
         if self.path != f"/api/attack/{name}" or name not in SCENARIOS:
             self.send_json({"error": "Unknown simulation."}, 404)
