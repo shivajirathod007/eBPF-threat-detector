@@ -117,9 +117,14 @@ static __always_inline u64 get_socket_inode(u32 fd) {
     struct file **files = table->fd;
     struct file *file = NULL;
     if (bpf_probe_read_kernel(&file, sizeof(file), &files[fd]) || !file) return 0;
-    struct inode *inode = file->f_inode;
-    if (!inode || (inode->i_mode & S_IFMT) != S_IFSOCK) return 0;
-    return inode->i_ino;
+    struct inode *inode = NULL;
+    if (bpf_probe_read_kernel(&inode, sizeof(inode), &file->f_inode) || !inode) return 0;
+    umode_t mode = 0;
+    if (bpf_probe_read_kernel(&mode, sizeof(mode), &inode->i_mode) ||
+        (mode & S_IFMT) != S_IFSOCK) return 0;
+    unsigned long number = 0;
+    if (bpf_probe_read_kernel(&number, sizeof(number), &inode->i_ino)) return 0;
+    return number;
 }
 
 int syscall__connect(struct pt_regs *ctx, int fd) {
@@ -135,7 +140,7 @@ int syscall__connect(struct pt_regs *ctx, int fd) {
 int trace_tcp4(struct pt_regs *ctx, void *sk, struct sockaddr_in *address, int length) {
     u64 thread = bpf_get_current_pid_tgid();
     struct endpoint *peer = endpoints.lookup(&thread);
-    if (!peer || length < sizeof(struct sockaddr_in)) return 0;
+    if (!peer || length < (int)sizeof(struct sockaddr_in)) return 0;
     struct sockaddr_in remote = {};
     if (bpf_probe_read_kernel(&remote, sizeof(remote), address) || remote.sin_family != AF_INET)
         return 0;
@@ -151,7 +156,7 @@ int trace_tcp6(struct pt_regs *ctx, void *sk, struct sockaddr_in6 *address, int 
     u64 thread = bpf_get_current_pid_tgid();
     struct endpoint *peer = endpoints.lookup(&thread);
     // sin6_scope_id may be absent in the original sockaddr.
-    if (!peer || length < offsetof(struct sockaddr_in6, sin6_scope_id)) return 0;
+    if (!peer || length < (int)offsetof(struct sockaddr_in6, sin6_scope_id)) return 0;
     struct sockaddr_in6 remote = {};
     if (bpf_probe_read_kernel(&remote, offsetof(struct sockaddr_in6, sin6_scope_id), address) ||
         remote.sin6_family != AF_INET6) return 0;
