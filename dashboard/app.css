@@ -63,7 +63,7 @@ h2 { font-size: 1.06rem; font-weight: 720; letter-spacing: -.015em; }
 .hero-actions { margin-top: 18px; gap: 9px; }
 .hero-scope { display: flex; align-items: center; gap: 12px; padding: 13px 15px; border: 1px solid #ffffff40; border-radius: 10px; background: #222044d9; }
 .hero-scope svg { width: 27px; height: 27px; color: #cec5ff; }
-.hero-scope small, .hero-scope span { color: #d4d5f2; display: block; font-size: .75rem; }
+.hero-scope small { color: #d4d5f2; display: block; font-size: .75rem; }
 .hero-scope strong { display: block; font-size: .86rem; }
 
 .button { display: inline-flex; gap: 7px; justify-content: center; align-items: center; min-height: 36px; padding: 6px 11px; border: 1px solid var(--line); border-radius: 7px; font-size: .81rem; font-weight: 680; white-space: nowrap; }

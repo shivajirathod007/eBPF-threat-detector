@@ -1,6 +1,10 @@
 #include <uapi/linux/ptrace.h>
 #include <linux/in.h>
+#include <linux/in6.h>
 #include <linux/sched.h>
+#include <linux/fdtable.h>
+#include <linux/fs.h>
+#include <linux/fcntl.h>
 #include <linux/errno.h>
 
 enum event_type { EXEC = 1, OPEN, CONNECT, DUP2, SETUID, PTRACE };
@@ -9,14 +13,16 @@ struct data_t {
     u64 ktime_ns;
     u64 process_start;
     u64 cgroup_id;
+    u64 socket_inode;
     u32 pid;
     u32 ppid;
     u32 uid;
     u32 type;
     u32 arg1;
     u32 arg2;
-    u32 ipv4;
     s32 result;
+    u16 family;
+    u8 address[16];
     char comm[16];
     char parent_comm[16];
     char path[256];
@@ -24,9 +30,9 @@ struct data_t {
 
 struct endpoint {
     int fd;
-    u32 ip;
     u16 port;
-    u8 tcp4;
+    u16 family;
+    u8 address[16];
 };
 
 struct redirection {
@@ -55,8 +61,7 @@ static __always_inline void identify(struct data_t *data, u32 type) {
     bpf_probe_read_kernel(data->parent_comm, sizeof(data->parent_comm), task->real_parent->comm);
 }
 
-// The syscall__ prefix tells BCC to unwrap syscall arguments on Ubuntu x86-64.
-int syscall__execve(struct pt_regs *ctx, const char *filename) {
+static __always_inline int trace_exec(struct pt_regs *ctx, const char *filename) {
     if (is_sensor()) return 0;
     struct data_t data = {};
     identify(&data, EXEC);
@@ -65,7 +70,7 @@ int syscall__execve(struct pt_regs *ctx, const char *filename) {
     return 0;
 }
 
-int syscall__openat(struct pt_regs *ctx, int dirfd, const char *filename, int flags) {
+static __always_inline int trace_open(struct pt_regs *ctx, const char *filename, u32 flags) {
     if (is_sensor()) return 0;
     struct data_t data = {};
     identify(&data, OPEN);
@@ -73,6 +78,47 @@ int syscall__openat(struct pt_regs *ctx, int dirfd, const char *filename, int fl
     bpf_probe_read_user_str(data.path, sizeof(data.path), filename);
     events.perf_submit(ctx, &data, sizeof(data));
     return 0;
+}
+
+// The syscall__ prefix tells BCC to unwrap syscall arguments on Ubuntu x86-64.
+int syscall__execve(struct pt_regs *ctx, const char *filename) {
+    return trace_exec(ctx, filename);
+}
+
+int syscall__execveat(struct pt_regs *ctx, int dirfd, const char *filename) {
+    return trace_exec(ctx, filename);
+}
+
+int syscall__open(struct pt_regs *ctx, const char *filename, int flags) {
+    return trace_open(ctx, filename, flags);
+}
+
+int syscall__openat(struct pt_regs *ctx, int dirfd, const char *filename, int flags) {
+    return trace_open(ctx, filename, flags);
+}
+
+int syscall__openat2(struct pt_regs *ctx, int dirfd, const char *filename, void *how, size_t size) {
+    if (is_sensor() || size < sizeof(u64)) return 0;
+    // The first member of the open_how UAPI structure contains the open flags.
+    u64 flags = 0;
+    if (bpf_probe_read_user(&flags, sizeof(flags), how)) return 0;
+    return trace_open(ctx, filename, (u32)flags);
+}
+
+int syscall__creat(struct pt_regs *ctx, const char *filename) {
+    return trace_open(ctx, filename, O_CREAT | O_WRONLY | O_TRUNC);
+}
+
+static __always_inline u64 get_socket_inode(u32 fd) {
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    struct fdtable *table = task->files->fdt;
+    if (!table || fd >= table->max_fds) return 0;
+    struct file **files = table->fd;
+    struct file *file = NULL;
+    if (bpf_probe_read_kernel(&file, sizeof(file), &files[fd]) || !file) return 0;
+    struct inode *inode = file->f_inode;
+    if (!inode || (inode->i_mode & S_IFMT) != S_IFSOCK) return 0;
+    return inode->i_ino;
 }
 
 int syscall__connect(struct pt_regs *ctx, int fd) {
@@ -92,9 +138,25 @@ int trace_tcp4(struct pt_regs *ctx, void *sk, struct sockaddr_in *address, int l
     struct sockaddr_in remote = {};
     if (bpf_probe_read_kernel(&remote, sizeof(remote), address) || remote.sin_family != AF_INET)
         return 0;
-    peer->ip = remote.sin_addr.s_addr;
+    // IPv4-mapped IPv6 invokes this hook after the IPv6 hook.
+    if (peer->family) return 0;
+    __builtin_memcpy(peer->address, &remote.sin_addr, sizeof(remote.sin_addr));
     peer->port = remote.sin_port;
-    peer->tcp4 = 1;
+    peer->family = AF_INET;
+    return 0;
+}
+
+int trace_tcp6(struct pt_regs *ctx, void *sk, struct sockaddr_in6 *address, int length) {
+    u64 thread = bpf_get_current_pid_tgid();
+    struct endpoint *peer = endpoints.lookup(&thread);
+    // sin6_scope_id may be absent in the original sockaddr.
+    if (!peer || length < offsetof(struct sockaddr_in6, sin6_scope_id)) return 0;
+    struct sockaddr_in6 remote = {};
+    if (bpf_probe_read_kernel(&remote, offsetof(struct sockaddr_in6, sin6_scope_id), address) ||
+        remote.sin6_family != AF_INET6) return 0;
+    __builtin_memcpy(peer->address, &remote.sin6_addr, sizeof(remote.sin6_addr));
+    peer->port = remote.sin6_port;
+    peer->family = AF_INET6;
     return 0;
 }
 
@@ -102,13 +164,16 @@ int connect_return(struct pt_regs *ctx) {
     u64 thread = bpf_get_current_pid_tgid();
     struct endpoint *peer = endpoints.lookup(&thread);
     if (!peer) return 0;
-    if (peer->tcp4) {
+    if (peer->family) {
         struct data_t data = {};
         identify(&data, CONNECT);
         data.arg1 = peer->fd;
         data.arg2 = peer->port;
-        data.ipv4 = peer->ip;
+        data.family = peer->family;
+        __builtin_memcpy(data.address, peer->address, sizeof(data.address));
         data.result = PT_REGS_RC(ctx);
+        if (data.result == 0 || data.result == -EINPROGRESS)
+            data.socket_inode = get_socket_inode(peer->fd);
         events.perf_submit(ctx, &data, sizeof(data));
     }
     endpoints.delete(&thread);
@@ -116,8 +181,12 @@ int connect_return(struct pt_regs *ctx) {
 }
 
 static __always_inline int track_dup(u32 oldfd, u32 newfd) {
-    if (newfd > 2 || oldfd == newfd || is_sensor()) return 0;
+    if (is_sensor()) return 0;
     u64 thread = bpf_get_current_pid_tgid();
+    if (newfd > 2 || oldfd == newfd) {
+        redirections.delete(&thread);
+        return 0;
+    }
     struct redirection fds = {oldfd, newfd};
     redirections.update(&thread, &fds);
     return 0;
@@ -135,11 +204,12 @@ int dup_return(struct pt_regs *ctx) {
     u64 thread = bpf_get_current_pid_tgid();
     struct redirection *fds = redirections.lookup(&thread);
     if (!fds) return 0;
-    if ((long)PT_REGS_RC(ctx) >= 0) {
+    if ((long)PT_REGS_RC(ctx) >= 0 && (u32)PT_REGS_RC(ctx) == fds->newfd) {
         struct data_t data = {};
         identify(&data, DUP2);
         data.arg1 = fds->oldfd;
         data.arg2 = fds->newfd;
+        data.socket_inode = get_socket_inode(fds->newfd);
         events.perf_submit(ctx, &data, sizeof(data));
     }
     redirections.delete(&thread);

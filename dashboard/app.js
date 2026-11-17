@@ -93,7 +93,6 @@ function status(state, label, note = "") {
   $("connection-note").textContent = note;
   if (state === "offline") {
     $("probe-count").textContent = "Sensor unavailable";
-    $("hero-sensor").textContent = "Sensor unavailable";
   }
 }
 
@@ -169,7 +168,7 @@ function renderStats() {
   $("lost-count").classList.toggle("warning-text", stats.dropped > 0);
   const probeLabel = stats.ready ? `${stats.probes} probes attached` : "Waiting for probes";
   $("probe-count").textContent = probeLabel;
-  $("hero-sensor").textContent = probeLabel;
+  $("last-sync").textContent = formatTime.format(new Date());
   const segments = $("severity-track").querySelectorAll("span");
   levels.forEach((level, index) => {
     const count = stats.severity[level];
@@ -182,7 +181,8 @@ function renderStats() {
 }
 
 function ruleName(rule) {
-  return rule.replaceAll("_", " ").replace(/^./, (first) => first.toUpperCase());
+  return rule.replaceAll("_", " ").replace(/\bssh\b/g, "SSH").replace("webserver", "web server")
+    .replace(/^./, (first) => first.toUpperCase());
 }
 
 function pill(text, severity) {
@@ -437,7 +437,8 @@ function renderCoverage() {
     const meta = node("div", undefined, "rule-meta");
     meta.append(pill(rule.severity, rule.severity), node("small", rule.mitre));
     const details = node("div", undefined, "rule-details");
-    details.append(node("strong", totals ? `${formatNumber.format(totals.count)} alerts` : "No alerts observed"));
+    details.append(node("strong", totals ? `${formatNumber.format(totals.count)} ${totals.count === 1 ? "alert" : "alerts"}` :
+      stats ? "No alerts observed" : "Waiting for sensor"));
     if (totals) details.append(node("small", `Last seen ${formatDate.format(new Date(totals.last_seen))}`));
     card.append(meta, node("h2", ruleName(rule.name)), node("p", rule.description), details);
     if (totals) card.append(button("View recent alerts", () => openFeed("alerts", {rule: rule.name}), "text-button"));
